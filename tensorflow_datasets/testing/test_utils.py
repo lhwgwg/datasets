@@ -16,13 +16,15 @@
 """Test utilities."""
 
 import contextlib
-import io
+import functools
 import os
+import pathlib
 import subprocess
 import tempfile
 from typing import Any, Iterator
 from unittest import mock
 
+from etils import epath
 import numpy as np
 import tensorflow as tf
 
@@ -65,7 +67,7 @@ def fake_examples_dir():
 
 
 class MockFs(object):
-  """This util wraps mock for the `tf.io.gfile` API.
+  """This util wraps mock for the `tf.io.gfile` / `epath.Path` API.
 
   Usage:
 
@@ -91,8 +93,8 @@ class MockFs(object):
   """
 
   def __init__(self):
-    self.files = {}
     self._cm = None
+    self._tmp_dir = None
 
   def __enter__(self):
     self._cm = self.contextmanager()
@@ -107,75 +109,87 @@ class MockFs(object):
     with self.mock():
       yield self
 
+  @contextlib.contextmanager
+  def mock(self):
+    with tempfile.TemporaryDirectory() as tmp_dir_:
+      assert not self._tmp_dir
+      self._tmp_dir = pathlib.Path(tmp_dir_)
+      with self._mock() as m:
+        yield m
+      self._tmp_dir = None
+      # TODO(epot): recursivelly record all
+
+  def _abspath(self, p) -> pathlib.Path:
+    """Normalize the path."""
+    p = os.fspath(p)
+    if p.startswith('/'):  # TODO(epot): Windows compatibility
+      p = p[1:]  # Strip leading `/`
+    out_p = self._tmp_dir / p
+    assert os.fspath(out_p).startswith(os.fspath(self._tmp_dir))  # Sanity check
+    return out_p
+
   def add_file(self, path, content=None) -> None:
     path = os.fspath(path)
     content = 'Content of {}'.format(path) if content is None else content
-    self.files[path] = content
+    fpath = self._abspath(path)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+    fpath.write_text(content)
 
-  def _list_directory(self, path):
-    path = os.fspath(path)
-    path = path.rstrip(os.path.sep) + os.path.sep  # Make sure path is a `dir/`
-    return list({
-        # Extract `path/<dirname>/...` -> `<dirname>`
-        os.path.relpath(p, path).split(os.path.sep)[0]
-        for p in self.files
-        if p.startswith(path)
-    })
+  def read_file(self, path) -> str:
+    return self._abspath(path).read_text()
 
-  @contextlib.contextmanager
-  def _open(self, path, mode='r'):
-    """Patch `tf.io.gfile.GFile`."""
-    path = os.fspath(path)
-    if mode.startswith('w'):
-      self.add_file(path, '')
-    is_binary = 'b' in mode
+  def _mock_open(self, original_fn, p, mode='r', **kwargs):
+    return original_fn(self._abspath(p), mode, **kwargs)
 
-    if path not in self.files:
-      raise FileNotFoundError(f'File {path} does not exist.')
-    content = self.files[path]
-    if is_binary:
-      fobj = io.BytesIO(content.encode('utf-8'))
-    else:
-      fobj = io.StringIO(content)
+  def _mock_fn(self, original_fn, p, **kwargs):
+    return original_fn(self._abspath(p), **kwargs)
 
-    with fobj as f:
-      yield f
-      new_content = f.getvalue()  # Update the content
+  def _mock_fn_2_args(self, original_fn, p, p2, **kwargs):
+    return original_fn(self._abspath(p), self._abspath(p2), **kwargs)
 
-    self.files[path] = new_content.decode('utf-8') if is_binary else new_content  # pytype: disable=attribute-error
+  def _mock(self):
 
-  def _rename(self, from_, to, overwrite=False):
-    from_ = os.fspath(from_)
-    to = os.fspath(to)
-    if not overwrite and to in self.files:
-      raise FileExistsError('Cannot overwrite: {} -> {}'.format(from_, to))  # pytype: disable=name-error
-    if from_ not in self.files:
-      raise FileNotFoundError('Cannot rename unknown file: {}'.format(from_))  # pytype: disable=name-error
-    self.files[to] = self.files.pop(from_)
+    def _unavailable(*args, **kwargs):
+      raise AssertionError('Function not mocked.')
 
-  def _exists(self, path: str) -> bool:
-    """Returns True, if any file/directory exists."""
-    path = os.fspath(path)
-    path = path.rstrip(os.path.sep)  # Normalize path
-    # Check full path existence
-    if path in self.files:
-      return True
-    # Check parent directory
-    path = path + os.path.sep
-    if any(f.startswith(path) for f in self.files):
-      return True
-    return False
-
-  def mock(self):
-    return mock_tf(
-        'tf.io.gfile',
-        exists=self._exists,
-        makedirs=lambda _: None,
-        # Used to get name of file as downloaded:
-        listdir=self._list_directory,
-        GFile=self._open,
-        rename=self._rename,
+    return mock_gfile(
+        exists=self._mock_fn,
+        listdir=self._mock_fn,
+        isdir=self._mock_fn,
+        remove=self._mock_fn,
+        rmtree=self._mock_fn,
+        mkdir=self._mock_fn,
+        makedirs=self._mock_fn,
+        open=self._mock_open,
+        rename=self._mock_fn_2_args,
+        replace=self._mock_fn_2_args,
+        copy=_unavailable,
+        glob=_unavailable,
     )
+
+
+@contextlib.contextmanager
+def mock_gfile(**kwargs: Any) -> Iterator[None]:
+  """Patch `tf.io.gfile.GFile` and `epath.Path`."""
+
+  epath_to_gfile_mapping = {
+      'open': 'GFile',
+  }
+  gfile_kwargs = {}
+  for k, fn in kwargs.items():
+    if k == 'replace':
+      continue
+    gfile_k = epath_to_gfile_mapping.get(k, k)
+    original_fn = getattr(tf.io.gfile, gfile_k)
+    mocked_fn = functools.partial(fn, original_fn)
+    gfile_kwargs[gfile_k] = mocked_fn
+
+  with contextlib.ExitStack() as stack:
+    cm_epath = epath.testing.mock_epath(**kwargs)
+    cm_gfile = mock_tf('tf.io.gfile', **gfile_kwargs)
+    stack.enter_context(cm_epath)
+    stack.enter_context(cm_gfile)
+    yield
 
 
 @contextlib.contextmanager
@@ -210,9 +224,15 @@ def mock_tf(symbol_name: str, *args: Any, **kwargs: Any) -> Iterator[None]:
       for submodule in tf_submodules:
         module = getattr(module, submodule)
       getattr(module, symbol_name)  # Trigger the lazy-loading of the TF API.
-      # Patch the module/object
-      stack.enter_context(
-          mock.patch.object(module, symbol_name, *args, **kwargs))
+      if kwargs:  # Patch each attribute individually
+        assert not args
+        for k, v in kwargs.items():
+          stack.enter_context(
+              mock.patch.object(getattr(module, symbol_name), k, v))
+      else:
+        # Patch the module/object
+        stack.enter_context(
+            mock.patch.object(module, symbol_name, *args, **kwargs))
     yield
 
 
