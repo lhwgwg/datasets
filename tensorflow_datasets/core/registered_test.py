@@ -23,6 +23,7 @@ from tensorflow_datasets.core import load
 from tensorflow_datasets.core import registered
 from tensorflow_datasets.core import splits
 from tensorflow_datasets.core import utils
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.core.utils import py_utils
 
 
@@ -77,7 +78,8 @@ class RegisteredTest(testing.TestCase):
 
     nonexistent = "nonexistent_foobar_dataset"
     with self.assertRaisesWithPredicateMatch(ValueError, "not found"):
-      load.builder_cls(nonexistent)
+      with error_utils.reraise_with_context(registered.DatasetNotFoundError):
+        load.builder_cls(nonexistent)
 
     with self.assertRaisesWithPredicateMatch(
         ValueError, "`builder_cls` only accept the `dataset_name`"):

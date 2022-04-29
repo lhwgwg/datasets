@@ -25,6 +25,7 @@ from etils import epath
 import pytest
 
 import tensorflow_datasets as tfds
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.scripts.cli import main
 
 type_utils = tfds.core.utils.type_utils
@@ -101,7 +102,9 @@ def test_build_single():
   assert _build('--datasets mnist') == ['mnist']
 
   with pytest.raises(tfds.core.registered.DatasetNotFoundError):
-    _build('unknown_dataset')
+    with error_utils.reraise_with_context(
+        tfds.core.registered.DatasetNotFoundError):
+      _build('unknown_dataset')
 
   with pytest.raises(AssertionError, match='cannot be loaded at version 1.0.0'):
     _build('mnist:1.0.0')  # Can only built the last version
@@ -206,7 +209,9 @@ def test_max_examples_per_split_0(mock_default_data_dir: pathlib.Path):  # pylin
 def test_build_files():
   # Make sure DummyDataset isn't registered by default
   with pytest.raises(tfds.core.registered.DatasetNotFoundError):
-    _build('dummy_dataset')
+    with error_utils.reraise_with_context(
+        tfds.core.registered.DatasetNotFoundError):
+      _build('dummy_dataset')
 
   with pytest.raises(FileNotFoundError, match='Could not find .* script'):
     _build('')
@@ -235,7 +240,9 @@ def test_build_files():
 def test_build_import():
   # DummyDataset isn't registered by default
   with pytest.raises(tfds.core.registered.DatasetNotFoundError):
-    _build('dummy_dataset')
+    with error_utils.reraise_with_context(
+        tfds.core.registered.DatasetNotFoundError):
+      _build('dummy_dataset')
 
   # --imports register the dataset
   ds_module = 'tensorflow_datasets.testing.dummy_dataset.dummy_dataset'

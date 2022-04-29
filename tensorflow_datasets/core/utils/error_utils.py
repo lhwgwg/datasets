@@ -61,7 +61,7 @@ def reraise_with_context(error_cls: Type[Exception]) -> Iterator[None]:
     yield
   except error_cls as e:
     context_msg = '\n'.join(context_holder.current_context_msg.messages)
-    utils.reraise(e, prefix=context_msg)
+    utils.reraise(e, suffix=context_msg)
   finally:
     del context_holder.current_context_msg
 

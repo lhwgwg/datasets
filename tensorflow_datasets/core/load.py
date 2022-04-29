@@ -34,6 +34,7 @@ from tensorflow_datasets.core import registered
 from tensorflow_datasets.core import splits as splits_lib
 from tensorflow_datasets.core import utils
 from tensorflow_datasets.core import visibility
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.core.utils import gcs_utils
 from tensorflow_datasets.core.utils import py_utils
 from tensorflow_datasets.core.utils import read_config as read_config_lib
@@ -85,20 +86,21 @@ def builder_cls(name: str) -> Type[dataset_builder.DatasetBuilder]:
     raise ValueError(
         '`builder_cls` only accept the `dataset_name` without config, '
         f"version or arguments. Got: name='{name}', kwargs={kwargs}")
-  try:
-    if ds_name.namespace:
-      # `namespace:dataset` are loaded from the community register
-      if visibility.DatasetType.COMMUNITY_PUBLIC.is_available():
-        return community.community_register.builder_cls(ds_name)
-      else:
-        raise ValueError(
-            f'Cannot load {ds_name} when community datasets are disabled')
+
+  if ds_name.namespace:
+    # `namespace:dataset` are loaded from the community register
+    if visibility.DatasetType.COMMUNITY_PUBLIC.is_available():
+      return community.community_register.builder_cls(ds_name)
     else:
+      raise ValueError(
+          f'Cannot load {ds_name} when community datasets are disabled')
+  else:
+    try:
       cls = registered.imported_builder_cls(str(ds_name))
       cls = typing.cast(Type[dataset_builder.DatasetBuilder], cls)
-    return cls
-  except registered.DatasetNotFoundError as e:
-    _reraise_with_list_builders(e, name=ds_name)  # pytype: disable=bad-return-type
+      return cls
+    except registered.DatasetNotFoundError as e:
+      _reraise_with_list_builders(e, name=ds_name)  # pytype: disable=bad-return-type
 
 
 def builder(
@@ -133,44 +135,46 @@ def builder(
   # 'kaggle:my_ds/config:1.0.0' -> (
   #     DatasetName('kaggle:my_ds'), {'version': '1.0.0', 'config': 'conf0'}
   # )
-  name, builder_kwargs = naming.parse_builder_name_kwargs(
-      name, **builder_kwargs)
+  with error_utils.reraise_with_context(registered.DatasetNotFoundError):
+    name, builder_kwargs = naming.parse_builder_name_kwargs(
+        name, **builder_kwargs)
 
-  # `try_gcs` currently only supports non-community datasets
-  if (try_gcs and not name.namespace and
-      gcs_utils.is_dataset_on_gcs(str(name))):
-    data_dir = builder_kwargs.get('data_dir')
-    if data_dir:
-      raise ValueError(
-          f'Cannot have both `try_gcs=True` and `data_dir={data_dir}` '
-          'explicitly set')
-    builder_kwargs['data_dir'] = gcs_utils.gcs_path('datasets')
-  if (visibility.DatasetType.COMMUNITY_PUBLIC.is_available() and
-      community.community_register.has_namespace(name.namespace)):
-    return community.community_register.builder(name=name, **builder_kwargs)
+    # `try_gcs` currently only supports non-community datasets
+    if (try_gcs and not name.namespace and
+        gcs_utils.is_dataset_on_gcs(str(name))):
+      data_dir = builder_kwargs.get('data_dir')
+      if data_dir:
+        raise ValueError(
+            f'Cannot have both `try_gcs=True` and `data_dir={data_dir}` '
+            'explicitly set')
+      builder_kwargs['data_dir'] = gcs_utils.gcs_path('datasets')
 
-  # First check whether we can find the corresponding dataset builder code
-  try:
-    cls = builder_cls(str(name))
-  except registered.DatasetNotFoundError as e:
-    cls = None  # Class not found
-    not_found_error = e  # Save the exception to eventually reraise
+    if (visibility.DatasetType.COMMUNITY_PUBLIC.is_available() and
+        community.community_register.has_namespace(name.namespace)):
+      return community.community_register.builder(name=name, **builder_kwargs)
 
-  # Eventually try loading from files first
-  if _try_load_from_files_first(cls, **builder_kwargs):
+    # First check whether we can find the corresponding dataset builder code
     try:
-      return read_only_builder.builder_from_files(str(name), **builder_kwargs)
+      cls = builder_cls(str(name))
     except registered.DatasetNotFoundError as e:
-      pass
+      cls = None  # Class not found
+      not_found_error = e  # Save the exception to eventually reraise
 
-  # If code exists and loading from files was skipped (e.g. files not found),
-  # load from the source code.
-  if cls:
-    with py_utils.try_reraise(prefix=f'Failed to construct dataset {name}: '):
-      return cls(**builder_kwargs)  # pytype: disable=not-instantiable
+    # Eventually try loading from files first
+    if _try_load_from_files_first(cls, **builder_kwargs):
+      try:
+        return read_only_builder.builder_from_files(str(name), **builder_kwargs)
+      except registered.DatasetNotFoundError as e:
+        pass
 
-  # If neither the code nor the files are found, raise DatasetNotFoundError
-  raise not_found_error
+    # If code exists and loading from files was skipped (e.g. files not found),
+    # load from the source code.
+    if cls:
+      with py_utils.try_reraise(prefix=f'Failed to construct dataset {name}: '):
+        return cls(**builder_kwargs)  # pytype: disable=not-instantiable
+
+    # If neither the code nor the files are found, raise DatasetNotFoundError
+    raise not_found_error
 
 
 def _try_load_from_files_first(
@@ -432,9 +436,9 @@ def _reraise_with_list_builders(
     e: Exception,
     name: naming.DatasetName,
 ) -> NoReturn:
-  """Add the list of available builders to the DatasetNotFoundError."""
+  """Adds the list of available builders to the DatasetNotFoundError."""
   # Should optimize to only filter through given namespace
-  all_datasets = list_builders(with_community_datasets=bool(name.namespace))
+  all_datasets = list_builders(with_community_datasets=False)
   all_datasets_str = '\n\t- '.join([''] + all_datasets)
   error_string = f'Available datasets:{all_datasets_str}\n'
   error_string += textwrap.dedent("""
@@ -449,6 +453,7 @@ def _reraise_with_list_builders(
   # Add close matches
   close_matches = difflib.get_close_matches(str(name), all_datasets, n=1)
   if close_matches:
-    error_string += f'\nDid you mean: {name} -> {close_matches[0]}\n'
+    error_string += f'\nDid you mean: {name} -> {close_matches[0]} ?\n'
 
-  raise py_utils.reraise(e, suffix=error_string)
+  error_utils.add_context(error_string)
+  raise e

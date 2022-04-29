@@ -28,6 +28,7 @@ from tensorflow_datasets.core import utils
 from tensorflow_datasets.core.community import register_package
 from tensorflow_datasets.core.community import register_path
 from tensorflow_datasets.core.community import registry as registry_lib
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.core.utils import gcs_utils
 
 
@@ -90,10 +91,12 @@ def test_register_builder(dummy_register):  # pylint: disable=redefined-outer-na
 
   with pytest.raises(
       registered.DatasetNotFoundError, match='Namespace .* not found.'):
-    dummy_register.builder(utils.DatasetName('non-existing-namespace:ds0'))
+    with error_utils.reraise_with_context(registered.DatasetNotFoundError):
+      dummy_register.builder(utils.DatasetName('non-existing-namespace:ds0'))
 
   with pytest.raises(registered.DatasetNotFoundError):
-    dummy_register.builder(utils.DatasetName('other:ds0'))
+    with error_utils.reraise_with_context(registered.DatasetNotFoundError):
+      dummy_register.builder(utils.DatasetName('other:ds0'))
 
 
 def test_register_path_list_builders(dummy_register):  # pylint: disable=redefined-outer-name

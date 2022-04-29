@@ -16,6 +16,7 @@
 """Meta register that uses other registers."""
 
 import dataclasses
+import difflib
 import functools
 import os
 from typing import Any, List, Mapping, Type
@@ -24,11 +25,13 @@ from etils import epath
 from tensorflow_datasets.core import dataset_builder
 # Make sure that github paths are registered
 from tensorflow_datasets.core import github_api  # pylint: disable=unused-import
+from tensorflow_datasets.core import naming
 from tensorflow_datasets.core import registered
 from tensorflow_datasets.core import utils
 from tensorflow_datasets.core.community import register_base
 from tensorflow_datasets.core.community import register_package
 from tensorflow_datasets.core.community import register_path
+from tensorflow_datasets.core.utils import error_utils
 from tensorflow_datasets.core.utils import gcs_utils
 import toml
 
@@ -138,12 +141,48 @@ class DatasetRegistry(register_base.BaseRegister):
         builders.extend(register.list_builders())
     return builders
 
+  def list_builders_per_namespace(self, namespace: str) -> List[str]:
+    """Lists the builders available for a specific namespace."""
+    builders = []
+    if self.has_namespace(namespace):
+      for register in self.registers_per_namespace[namespace]:
+        builders.extend(register.list_builders())
+    return builders
+
+  def _add_list_builders_to_error_context(self,
+                                          name: naming.DatasetName) -> None:
+    """Adds relevant information to the error context."""
+    # Add list of available datasets to error context.
+    all_datasets = self.list_builders_per_namespace(name.namespace)
+    all_datasets_str = '\n\t- '.join([''] + all_datasets)
+    error_utils.add_context(
+        f'Available datasets under the same namespace:{all_datasets_str}\n')
+    # Add closest match to error context.
+    close_matches = difflib.get_close_matches(str(name), all_datasets, n=1)
+    if close_matches:
+      error_utils.add_context(
+          f'\nDid you mean: {name} -> {close_matches[0]} ?\n')
+
   def _get_registers(
       self, name: utils.DatasetName) -> List[register_base.BaseRegister]:
+    """Returns all available registers for a given namespace, if any.
+
+    Args:
+      name: str, the namespace's name.
+
+    Raises:
+      DatasetNotFound error if the namespace is not found.
+    """
     if not self.has_namespace(name.namespace):
-      raise registered.DatasetNotFoundError(
-          f'Namespace {name.namespace} not found. Should be one of: '
-          f'{sorted(self.registers_per_namespace.keys())}')
+      error_utils.add_context(f'\nNamespace {name.namespace} not found.')
+      error_utils.add_context(f'Note that namespace should be one of: '
+                              f'{sorted(self.registers_per_namespace.keys())}')
+      close_matches = difflib.get_close_matches(
+          name.namespace, self.registers_per_namespace, n=1)
+      if close_matches:
+        error_utils.add_context(
+            f'Did you mean: {name.namespace} -> {close_matches[0]} ?\n')
+      raise registered.DatasetNotFoundError
     return self.registers_per_namespace[name.namespace]
 
   def builder_cls(
@@ -171,10 +210,11 @@ class DatasetRegistry(register_base.BaseRegister):
         return register.builder_cls(name)
       except registered.DatasetNotFoundError:
         pass
+    error_utils.add_context(f'Namespace {name.namespace} found, '
+                            f'but could not load dataset {name.name}.')
+    self._add_list_builders_to_error_context(name)
 
-    raise registered.DatasetNotFoundError(
-        f'Namespace {name.namespace} found, '
-        f'but could not load dataset {name.name}.')
+    raise registered.DatasetNotFoundError
 
   def builder(
       self,
@@ -187,15 +227,20 @@ class DatasetRegistry(register_base.BaseRegister):
     # Typically there's only 1, so add special case so that more informative
     # exceptions are raised.
     if len(registers) == 1:
-      return registers[0].builder(name, **builder_kwargs)
+      try:
+        return registers[0].builder(name, **builder_kwargs)
+      except registered.DatasetNotFoundError as e:
+        error_utils.add_context(
+            f'Namespace {name.namespace} found with {len(registers)} registers, '
+            f'but could not load dataset {name.name}.')
+        self._add_list_builders_to_error_context(name)
+        raise e
 
     if len(registers) > 1:
       raise ValueError(f'Namespace {name.namespace} has multiple registers! '
                        f'This should not happen! Registers: {registers}')
 
-    raise registered.DatasetNotFoundError(
-        f'Namespace {name.namespace} found with {len(registers)} registers, '
-        f'but could not load dataset {name.name}.')
+    raise registered.DatasetNotFoundError
 
   def get_builder_root_dirs(self, name: utils.DatasetName) -> List[epath.Path]:
     """Returns root dir of the generated builder (without version/config)."""
