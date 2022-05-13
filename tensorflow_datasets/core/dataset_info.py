@@ -31,11 +31,12 @@ processed the dataset as well:
 """
 
 import abc
+import dataclasses
 import json
 import os
 import posixpath
 import tempfile
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 from absl import logging
 from etils import epath
@@ -98,6 +99,35 @@ class Metadata(dict):
     raise NotImplementedError()
 
 
+@dataclasses.dataclass()
+class DatasetIdentity:
+  name: str
+  version: utils.Version
+  data_dir: str
+  module_name: str
+  config_name: Optional[str] = None
+  config_description: Optional[str] = None
+  release_notes: Optional[Dict[str, str]] = None
+
+  @classmethod
+  def from_builder(cls, builder) -> "DatasetIdentity":
+    if builder.builder_config:
+      config_name = builder.builder_config.name
+      config_description = builder.builder_config.description
+    else:
+      config_name = None
+      config_description = None
+    return cls(
+        name=builder.name,
+        version=builder.version,
+        data_dir=builder.data_dir,
+        module_name=str(builder.__module__),
+        config_name=config_name,
+        config_description=config_description,
+        release_notes=builder.release_notes,
+    )
+
+
 class DatasetInfo(object):
   """Information about a dataset.
 
@@ -114,7 +144,8 @@ class DatasetInfo(object):
   def __init__(
       self,
       *,
-      builder,
+      identity: Optional[DatasetIdentity] = None,
+      builder: Optional[Any] = None,
       description: Optional[str] = None,
       features: Optional[feature_lib.FeatureConnector] = None,
       supervised_keys: Optional[SupervisedKeysType] = None,
@@ -129,7 +160,9 @@ class DatasetInfo(object):
     """Constructs DatasetInfo.
 
     Args:
-      builder: `DatasetBuilder`, dataset builder for this info.
+      identity: optional `DatasetIdentity`, identity of the dataset with info
+        such as the name, version, config, and release notes.
+      builder: optional `DatasetBuilder`, dataset builder for this info.
       description: `str`, description of this dataset.
       features: `tfds.features.FeaturesDict`, Information on the feature dict of
         the `tf.data.Dataset()` object from the `builder.as_dataset()` method.
@@ -168,25 +201,22 @@ class DatasetInfo(object):
       split_dict: information about the splits in this dataset.
     """
     # pyformat: enable
-    self._builder = builder
-
-    if builder.builder_config:
-      config_name = builder.builder_config.name
-      config_description = builder.builder_config.description
-    else:
-      config_name = None
-      config_description = None
+    if ((not identity and not builder) or (identity and builder)):
+      raise ValueError("Either builder or identity needs to be given")
+    if not identity:
+      identity = DatasetIdentity.from_builder(builder)
+    self._identity = identity
 
     self._info_proto = dataset_info_pb2.DatasetInfo(
-        name=builder.name,
+        name=identity.name,
         description=utils.dedent(description),
-        version=str(builder.version),
-        release_notes=builder.release_notes,
+        version=str(identity.version),
+        release_notes=identity.release_notes,
         disable_shuffling=disable_shuffling,
-        config_name=config_name,
-        config_description=config_description,
+        config_name=identity.config_name,
+        config_description=identity.config_description,
         citation=utils.dedent(citation),
-        module_name=str(builder.__module__),
+        module_name=identity.module_name,
         redistribution_info=dataset_info_pb2.RedistributionInfo(
             license=utils.dedent(license or redistribution_info.pop("license")),
             **redistribution_info) if redistribution_info else None)
@@ -261,8 +291,8 @@ class DatasetInfo(object):
   @property
   def full_name(self):
     """Full canonical name: (<dataset_name>/<config_name>/<version>)."""
-    names = [self._builder.name]
-    if self._builder.builder_config:
+    names = [self._identity.name]
+    if self._identity.config_name:
       names.append(self._builder.builder_config.name)
     names.append(str(self.version))
     return posixpath.join(*names)
@@ -273,11 +303,11 @@ class DatasetInfo(object):
 
   @property
   def version(self):
-    return self._builder.version
+    return self._identity.version
 
   @property
   def release_notes(self) -> Optional[Dict[str, str]]:
-    return self._builder.release_notes
+    return self._identity.release_notes
 
   @property
   def disable_shuffling(self) -> bool:
@@ -295,7 +325,7 @@ class DatasetInfo(object):
 
   @property
   def data_dir(self):
-    return self._builder.data_dir
+    return self._identity.data_dir
 
   @property
   def dataset_size(self) -> utils.Size:
@@ -383,11 +413,11 @@ class DatasetInfo(object):
         # When splits are from multiple folders, the dataset can be different.
         continue
       if (split_info.filename_template and
-          self._builder.name != split_info.filename_template.dataset_name):
+          self._identity.name != split_info.filename_template.dataset_name):
         raise AssertionError(
             f"SplitDict contains SplitInfo for split {split} whose "
             "dataset_name does not match to the dataset name in dataset_info. "
-            f"{self._builder.name} != {split_info.filename_template.dataset_name}"
+            f"{self._identity.name} != {split_info.filename_template.dataset_name}"
         )
 
     # If the statistics have been pre-loaded, forward the statistics
@@ -494,7 +524,7 @@ class DatasetInfo(object):
 
     # Update splits
     filename_template = naming.ShardedFileTemplate(
-        dataset_name=self._builder.name,
+        dataset_name=self._identity.name,
         data_dir=self.data_dir,
         filetype_suffix=parsed_proto.file_format or "tfrecord")
     split_dict = splits_lib.SplitDict.from_proto(
@@ -551,11 +581,11 @@ class DatasetInfo(object):
       else:
         setattr(self._info_proto, field_name, field_value_restored)
 
-    if self._builder._version != self.version:  # pylint: disable=protected-access
+    if str(self._identity.version) != self._info_proto.version:
       raise AssertionError(
           "The constructed DatasetInfo instance and the restored proto version "
           "do not match. Builder version: {}. Proto version: {}".format(
-              self._builder._version, self.version))  # pylint: disable=protected-access
+              self._identity.version, self._info_proto.version))
 
     # Mark as fully initialized.
     self._fully_initialized = True
