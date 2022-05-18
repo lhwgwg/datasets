@@ -354,6 +354,19 @@ class DatasetInfoTest(testing.TestCase):
         str([split_info1.to_proto(),
              split_info2.to_proto()]))
 
+  def test_set_file_format_override_fails(self):
+    info = dataset_info.DatasetInfo(builder=self._builder)
+    self.assertEqual(info.file_format, file_adapters.FileFormat.TFRECORD)
+    with pytest.raises(
+        AssertionError, match="SplitDict contains SplitInfo for split"):
+      info.set_file_format(file_adapters.FileFormat.RIEGELI)
+
+  def test_set_file_format_override(self):
+    info = dataset_info.DatasetInfo(builder=self._builder)
+    self.assertEqual(info.file_format, file_adapters.FileFormat.TFRECORD)
+    info.set_file_format(file_adapters.FileFormat.RIEGELI, override=True)
+    self.assertEqual(info.file_format, file_adapters.FileFormat.RIEGELI)
+
 
 @pytest.mark.parametrize(
     "file_format",

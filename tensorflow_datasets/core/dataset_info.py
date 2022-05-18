@@ -346,6 +346,7 @@ class DatasetInfo(object):
   def set_file_format(
       self,
       file_format: Union[None, str, file_adapters.FileFormat],
+      override: bool = False,
   ) -> None:
     """Internal function to define the file format.
 
@@ -354,6 +355,12 @@ class DatasetInfo(object):
 
     Args:
       file_format: The file format.
+      override: Whether the file format should be overridden if it is already
+        set.
+
+    Raises:
+      ValueError if the file format was already set and the `override` parameter
+      was False.
     """
     # If file format isn't present already, fallback to `DEFAULT_FILE_FORMAT`
     file_format = (
@@ -367,7 +374,8 @@ class DatasetInfo(object):
       utils.reraise(e, suffix=f". Valid file formats: {all_values}")
 
     # If the file format has been set once, file format should be consistent
-    if self.file_format and self.file_format != new_file_format:
+    if (not override and self.file_format and
+        self.file_format != new_file_format):
       raise ValueError(f"File format is already set to {self.file_format}. "
                        f"Got {new_file_format}")
     self.as_proto.file_format = new_file_format.value
